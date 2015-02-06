@@ -100,12 +100,12 @@ public class TopNQueryMeta  extends BaseAggQueryMeta {
     
     @Override
     public JSONObject getJson() {
-        return new JSONObject(getJsonMap());
+        return new JSONObject(getDataMap());
     }
     
     @Override
-    public Map<String, Object> getJsonMap() {
-        Map<String, Object> map = super.getJsonMap();
+    public Map<String, Object> getDataMap() {
+        Map<String, Object> map = super.getDataMap();
         map.put("queryType", "topN");
         map.remove("dimensions");// During promotion from GroupBy dimensions may have sneaked in so remove it.
         if (dimension != null) {
@@ -125,7 +125,12 @@ public class TopNQueryMeta  extends BaseAggQueryMeta {
             if (gBQMeta.fetchDimensions != null && gBQMeta.fetchDimensions.size() == 1) {
                 for (String dim:gBQMeta.fetchDimensions.keySet()) {// We care only about 1st dimension
                     String dimaAlias = gBQMeta.fetchDimensions.get(dim);
-                    topN.dimension = dimaAlias;
+                    if (dimaAlias == null) {//Directly use the dim
+                        topN.dimension = dim;
+                    } else {
+                        topN.dimension = dimaAlias;
+                    }
+                    
                     break;// Break after the first dimension.
                 }
             } else {

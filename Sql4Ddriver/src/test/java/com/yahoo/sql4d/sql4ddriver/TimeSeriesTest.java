@@ -15,7 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.testng.annotations.Test;
-import scala.Either;
+import scala.util.Either;
 
 /**
  * Timeseries test.
@@ -29,7 +29,7 @@ public class TimeSeriesTest extends AnalyticsDruidTestBase {
 
     @Test
     public void testTimeSeriesBean() throws Exception {
-        Either<String, Either<List<TimeSeriesBean>, Map<Object, TimeSeriesBean>>> mapperRes = source.query(tsJoin, TimeSeriesBean.class, false);
+        Either<String, Either<List<TimeSeriesBean>, Map<Object, TimeSeriesBean>>> mapperRes = source.query(tsJoin, null, TimeSeriesBean.class, null, false);
         if (mapperRes.isLeft()) {
             throw new Exception(mapperRes.left().get());
         }

@@ -10,10 +10,10 @@
  */
 package com.yahoo.sql4d.query.nodes;
 
+import com.google.common.base.Preconditions;
+import com.yahoo.sql4d.utils.TimeUtils;
 import org.joda.time.DateTime;
 import org.joda.time.Days;
-import org.joda.time.format.DateTimeFormat;
-import org.joda.time.format.DateTimeFormatter;
 
 /**
  * Interval (start,end) times as text. Can construct new intervals out of existing.
@@ -21,12 +21,6 @@ import org.joda.time.format.DateTimeFormatter;
  * @author srikalyan
  */
 public class Interval {
-    private static final DateTimeFormatter dateOnlyFormat = DateTimeFormat.forPattern("yyyy-MM-dd").withOffsetParsed();
-    private static final DateTimeFormatter dateTimeFormat = DateTimeFormat.forPattern("yyyy-MM-dd'T'HH:mm:ss").withOffsetParsed();
-    private static final DateTimeFormatter dateTimeWithSubSecFormat = DateTimeFormat.forPattern("yyyy-MM-dd'T'HH:mm:ss.SSS").withOffsetParsed();
-    private static final DateTimeFormatter dateTimeAndTZFormat = DateTimeFormat.forPattern("yyyy-MM-dd'T'HH:mm:ssZZ").withOffsetParsed();
-    private static final DateTimeFormatter dateTimeWithSubSecAndTZFormat = DateTimeFormat.forPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZZ").withOffsetParsed();
-
     public String startTime;
     public String endTime;
     public int days;// Includes partial days as well.
@@ -37,12 +31,24 @@ public class Interval {
         days = Days.daysBetween(getStartTime().withTimeAtStartOfDay() , getEndTime().withTimeAtStartOfDay() ).getDays() + 1;
     }
 
+    /**
+     * Interval should be of form 2014-10-31T00:00:00.000-07:00/2014-11-01T00:00:00.000-07:00
+     * @param interval 
+     */
+    public Interval(String interval) {
+        String[] dates = interval.split("/");
+        Preconditions.checkArgument(dates.length == 2);
+        this.startTime = dates[0].replaceAll("'", "");
+        this.endTime = dates[1].replaceAll("'", "");
+        days = Days.daysBetween(getStartTime().withTimeAtStartOfDay() , getEndTime().withTimeAtStartOfDay() ).getDays() + 1;
+    }
+
     public DateTime getStartTime() {
-        return getDateTime(startTime);
+        return TimeUtils.getDateTime(startTime);
     }
 
     public DateTime getEndTime() {
-        return getDateTime(endTime);
+        return TimeUtils.getDateTime(endTime);
     }
 
     public int getDays() {
@@ -54,31 +60,29 @@ public class Interval {
         return new Interval(baseDateTime.plusHours(startHourOffset).toString(), 
                 baseDateTime.plusHours(endHourOffset).minusSeconds(1).toString());
     }
-            
-    private DateTime getDateTime(String strTime) {
-        DateTime dateTime = null;
-        if ((dateTime = tryFormat(strTime, dateTimeWithSubSecAndTZFormat)) == null) {
-            if ((dateTime = tryFormat(strTime, dateTimeAndTZFormat)) == null) {
-                if ((dateTime = tryFormat(strTime, dateTimeWithSubSecFormat)) == null) {
-                    if ((dateTime = tryFormat(strTime, dateTimeFormat)) == null) {
-                        if ((dateTime = tryFormat(strTime, dateOnlyFormat)) == null) {
-                            return dateTime;
-                        }
-                    }
-                }
-            }
-        }
-        return dateTime;
+
+    public Interval expandIntervalByDay(int days) {
+        return new Interval(getStartTime().minusDays(days).toString(), 
+                getEndTime().plusDays(days).toString());
+    }
+
+    public Interval expandEndTimeByDay(int days) {
+        return new Interval(getStartTime().toString(), 
+                getEndTime().plusDays(days).toString());
+    }
+
+    public Interval expandIntervalBySec(int secs) {
+        return new Interval(getStartTime().minusSeconds(secs).toString(), 
+                getEndTime().plusSeconds(secs).toString());
+    }
+
+    @Override
+    public String toString() {
+        return String.format("%s/%s", startTime, endTime);
     }
     
-    private DateTime tryFormat(String timeStr, DateTimeFormatter formatter) {
-        DateTime result = null;
-        try {
-            result = formatter.parseDateTime(timeStr);
-        } catch (UnsupportedOperationException | IllegalArgumentException e) {
-            //TODO: Log this instead of dumping to console.
-            //System.err.println("Date Format error " + e);
-        }
-        return result;
+    public boolean fallsIn(Interval range) {
+        return range.getStartTime().isBefore(getStartTime()) && range.getEndTime().isAfter(getEndTime());
     }
+
 }

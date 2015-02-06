@@ -8,19 +8,13 @@
  * specific language governing permissions and limitations under the License. 
  * See accompanying LICENSE file.
  */
-package com.yahoo.sql4d.query;
+package com.yahoo.sql4d;
 
 /**
- *
+ * One or more insert meta.
  * @author srikalyan
+ * @param <T>
  */
-public class Pair<T> {
-    public T a;
-    public T b;
-
-    public Pair(T a, T b) {
-        this.a = a;
-        this.b = b;
-    }
-    
+public abstract class CrudProgram<T extends CrudStatementMeta> extends Program<T>{
+    public boolean waitForCompletion = true;
 }

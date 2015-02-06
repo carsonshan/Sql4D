@@ -10,6 +10,7 @@
  */
 package com.yahoo.sql4dclient;
 
+import com.google.common.base.Splitter;
 import com.yahoo.sql4d.sql4ddriver.DDataSource;
 import com.yahoo.sql4d.sql4ddriver.Joiner4All;
 import com.yahoo.sql4d.sql4ddriver.Mapper4All;
@@ -19,7 +20,9 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -30,7 +33,7 @@ import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.HelpFormatter;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
-import scala.Either;
+import scala.util.Either;
 import scala.Tuple2;
 
 /**
@@ -54,8 +57,16 @@ public class Main {
     private static int brokerPort = 4080;
     private static String coordinatorHost = "";
     private static int coordinatorPort = 8082;
+    private static String overlordHost = "";
+    private static int overlordPort = 8087;
+    private static String mysqlHost = "";
+    private static int mysqlPort = 3306;
+    private static String mysqlId = "";
+    private static String mysqlPasswd = "";
+    private static String mysqlDbName = "";
     private static String proxyHost = null;
     private static int proxyPort = 3128;
+    private static Map<String, String> httpHeaders = new HashMap<>();
     
     private static CircularBuffer<String> history;
     
@@ -84,9 +95,16 @@ public class Main {
         options.addOption("bp", "broker_port", true, "Druid broker node port");
         options.addOption("ch", "coordinator_host", true, "Druid coordinator node hostname/Ip");
         options.addOption("cp", "coordinator_port", true, "Druid coordinator node port");
-        options.addOption("ph", "proxy_host", true, "Druid proxy node hostname/Ip");
+        options.addOption("oh", "overlord_host", true, "Druid overlord node hostname/Ip");
+        options.addOption("op", "overlord_port", true, "Druid overlord node port");
+        options.addOption("mh", "mysql_host", true, "Druid MySql hostname/Ip");
+        options.addOption("mp", "mysql_port", true, "Druid MySql node port");
+        options.addOption("mid", "mysql_id", true, "Druid MySql user Id");
+        options.addOption("mpw", "mysql_passwd", true, "Druid MySql password");
+        options.addOption("mdb", "mysql_dbname", true, "Druid MySql db name");
         options.addOption("pp", "proxy_port", true, "Druid proxy node port");
         options.addOption("i", "history", true, "Number of commands in history");
+        options.addOption("hh", "http_headers", true, "Http Headers if any to pass");
         parser = new BasicParser();
     }
 
@@ -98,7 +116,7 @@ public class Main {
     }
     
     private static void printHelp() {
-        println(" 1. select queries        (GroupBy, TimeSeries, TopN, Select, Search). See wiki for examples: https://github.com/srikalyc/Sql4D/wiki/Sql4DCompiler");
+        println(" 1. select/crud statements   (GroupBy, TimeSeries, TopN, Select, Search, Insert). See wiki for examples: https://github.com/srikalyc/Sql4D/wiki/Sql4DCompiler");
         println(" 2. generatebean=BeanName (This command must be preceding a SQL, it generates a java source file BeanName.java which extends DruidBaseBean.");
         println(" 3. trace=[true|false]    (When enabled prints out compiled JSON query)");
         println(" 4. querymode=[sql|json]  (Default is sql, when mode is json it is fired directly)");
@@ -113,38 +131,61 @@ public class Main {
         defineOptions();
         try {
             CommandLine cmd = parser.parse(options, args);
-            if (!(cmd.hasOption("bh") || cmd.hasOption("broker_host")) || !(cmd.hasOption("bp") || cmd.hasOption("broker_port"))
-                    || !(cmd.hasOption("ch") || cmd.hasOption("coordinator_host")) || !(cmd.hasOption("cp") || cmd.hasOption("coordinator_port"))
+            if (!cmd.hasOption("bh") || !cmd.hasOption("bp")
+                    || !cmd.hasOption("ch") || !cmd.hasOption("cp")
+                    || !cmd.hasOption("oh") || !cmd.hasOption("op")
                      || !cmd.hasOption("i")) {
                 printUsage();
             }
-            brokerHost = getOptionValue(cmd, "bh", "broker_host");
-            brokerPort = Integer.parseInt(getOptionValue(cmd, "bp", "broker_port"));
-            coordinatorHost = getOptionValue(cmd, "ch", "coordinator_host");
-            coordinatorPort = Integer.parseInt(getOptionValue(cmd, "cp", "coordinator_port"));
+            brokerHost = getOptionValue(cmd, "bh", "broker_host", null);
+            brokerPort = Integer.parseInt(getOptionValue(cmd, "bp", "broker_port", null));
+            coordinatorHost = getOptionValue(cmd, "ch", "coordinator_host", null);
+            coordinatorPort = Integer.parseInt(getOptionValue(cmd, "cp", "coordinator_port", null));
+            overlordHost = getOptionValue(cmd, "oh", "overlord_host", null);
+            overlordPort = Integer.parseInt(getOptionValue(cmd, "op", "overlord_port", null));
+            mysqlHost = getOptionValue(cmd, "mh", "mysql_host", "localhost");
+            mysqlPort = Integer.parseInt(getOptionValue(cmd, "mp", "mysql_port", "3306"));
+            mysqlId = getOptionValue(cmd, "mid", "mysql_id", "druid");
+            mysqlPasswd = getOptionValue(cmd, "mpw", "mysql_passwd", "diurd");
+            mysqlDbName = getOptionValue(cmd, "mdb", "mysql_dbname", "druid");
             
-            proxyHost = getOptionValue(cmd, "ph", "proxy_host");
+            httpHeaders = extractHeaders(getOptionValue(cmd, "hh", "http_headers", null));
+            
+            proxyHost = getOptionValue(cmd, "ph", "proxy_host", null);
             if (proxyHost != null) {
-                proxyPort = Integer.parseInt(getOptionValue(cmd, "pp", "proxy_port"));
+                proxyPort = Integer.parseInt(getOptionValue(cmd, "pp", "proxy_port", "1234"));
+                DDataSource.setProxy(proxyHost, proxyPort);
             }
+            dDriver = new DDataSource(brokerHost, brokerPort, coordinatorHost, coordinatorPort, overlordHost, 
+                    overlordPort, mysqlHost, mysqlPort, mysqlId, mysqlPasswd, mysqlDbName);
             
-            history = new CircularBuffer<>(Integer.parseInt(getOptionValue(cmd, "i", "history")));
-
-            dDriver = new DDataSource(brokerHost, brokerPort, coordinatorHost, coordinatorPort, proxyHost, proxyPort);
+            history = new CircularBuffer<>(Integer.parseInt(getOptionValue(cmd, "i", "history", "50")));
+            
         } catch (ParseException ex) {
             Logger.getLogger(Main.class.getName()).log(Level.SEVERE, null, ex);
         }
     }
    
-    private static String getOptionValue(CommandLine cmd, String opt1, String opt2) {
+    private static String getOptionValue(CommandLine cmd, String opt1, String opt2, String defaultVal) {
         if (opt1 != null && cmd.hasOption(opt1)) {
             return cmd.getOptionValue(opt1);
         } else if (opt2 != null && cmd.hasOption(opt2)) {
             return cmd.getOptionValue(opt2);
         }
-        return null;
+        return defaultVal;
     }
         
+    /**
+     * HeaderKey1:value1|HeaderKey2:value2...
+     * @param value
+     * @return 
+     */
+    private static Map<String, String> extractHeaders(String value) {
+        if (value == null) 
+            return null;
+        return Splitter.on("|").withKeyValueSeparator(":").split(value);
+    }
+    
     private static void readCommands() {
         try {
             int ip = -1;
@@ -186,6 +227,9 @@ public class Main {
                     if (readyCommand) {
                         readyCommand = false;
                         runCommand(frozenCommand);// Execute command.
+                    } else {
+                        // Make sure to append the newline if we aren't executing right now, since it needs to act like a whitespace.
+                        cmdBuffer.append(ipChar);
                     }
                     print(PROMPT);
                 } else {
@@ -209,6 +253,7 @@ public class Main {
     }
     
     private static boolean runCommand(String frozenCommand) {
+        frozenCommand = frozenCommand.replaceAll("\n", "");
         if (frozenCommand.matches(quitRegex)) {
             println("Good Bye !!");
             System.exit(0);
@@ -235,49 +280,51 @@ public class Main {
         } else if (frozenCommand.matches(allTablesRegex)) {
             Matcher matcher = allTablesPattern.matcher(frozenCommand);
             if (matcher.matches()) {// Show tables command.
-                Either<String,List<String>> dataSourcesRes = dDriver.dataSources();
+                Either<String,List<String>> dataSourcesRes = dDriver.dataSources(httpHeaders);
                 if (dataSourcesRes.isLeft()) {
                     println(dataSourcesRes.left().get());
+                } else {
+                    List<String> dataSources = dataSourcesRes.right().get();
+                    Collections.sort(dataSources);
+                    String [][] dataSourcesTable = new String[dataSources.size() + 1][];
+                    dataSourcesTable[0] = new String[] {"Tables"};
+                    for (int i = 0;i < dataSources.size();i++) {
+                        dataSourcesTable[i + 1] = new String[] {dataSources.get(i)};
+                    }
+                    PrettyPrint.print(dataSourcesTable);
                 }
-                List<String> dataSources = dataSourcesRes.right().get();
-                Collections.sort(dataSources);
-                String [][] dataSourcesTable = new String[dataSources.size() + 1][];
-                dataSourcesTable[0] = new String[] {"Tables"};
-                for (int i = 0;i < dataSources.size();i++) {
-                    dataSourcesTable[i + 1] = new String[] {dataSources.get(i)};
-                }
-                PrettyPrint.print(dataSourcesTable);
             }                      
         } else if (frozenCommand.matches(descTableRegex)) {
             Matcher matcher = descTablePattern.matcher(frozenCommand);
             if (matcher.matches()) {// Show tables command.
                 String tableName = matcher.group(1);
-                Either<String, Tuple2<List<String>, List<String>>> dataSourceDescRes = dDriver.aboutDataSource(tableName);
+                Either<String, Tuple2<List<String>, List<String>>> dataSourceDescRes = dDriver.aboutDataSource(tableName, httpHeaders);
                 if (dataSourceDescRes.isLeft()) {
                     println(dataSourceDescRes.left().get());
+                } else {
+                    List<String> dims = dataSourceDescRes.right().get()._1();
+                    Collections.sort(dims);
+                    List<String> metrics = dataSourceDescRes.right().get()._2();
+                    Collections.sort(metrics);
+                    String [][] table = new String[dims.size() + metrics.size() + 2][];// 1 for header + 1 for timestamp
+                    table[0] = new String[] {"Field", "Type"};
+                    table[1] = new String[] {"timestamp", "Implicit_Dimension"};
+                    int i = 2;
+                    for (;i < dims.size() + 2;i++) {
+                        table[i] = new String[] {dims.get(i - 2), "Dimension"};
+                    }
+                    for (;i < dims.size() + metrics.size() + 2;i++) {
+                        table[i] = new String[] {metrics.get(i - dims.size() - 2), "Metric"};
+                    }
+                    PrettyPrint.print(table);
                 }
-                List<String> dims = dataSourceDescRes.right().get()._1();
-                Collections.sort(dims);
-                List<String> metrics = dataSourceDescRes.right().get()._2();
-                Collections.sort(metrics);
-                String [][] table = new String[dims.size() + metrics.size() + 2][];// 1 for header + 1 for timestamp
-                table[0] = new String[] {"Field", "Type"};
-                table[1] = new String[] {"timestamp", "Implicit_Dimension"};
-                int i = 2;
-                for (;i < dims.size() + 2;i++) {
-                    table[i] = new String[] {dims.get(i - 2), "Dimension"};
-                }
-                for (;i < dims.size() + metrics.size() + 2;i++) {
-                    table[i] = new String[] {metrics.get(i - dims.size() - 2), "Metric"};
-                }
-                PrettyPrint.print(table);
             }                      
         } else {// Sql/json command.
             long start = System.currentTimeMillis();
-            Either<String, Either<Joiner4All, Mapper4All>> result = dDriver.query(frozenCommand, trace, queryMode);
+            Either<String, Either<Joiner4All, Mapper4All>> result = dDriver.query(frozenCommand, null, httpHeaders, trace, queryMode);
             long queryTime = System.currentTimeMillis() - start;
             if (result.isLeft()) {
-                println(result.left().get());
+                println("Error : " + result.left().get());
                 printf("(%f sec)\n", queryTime/1000.0);
             } else {
                 Either<Joiner4All, Mapper4All> goodResult = result.right().get();
@@ -352,7 +399,6 @@ public class Main {
     
     public static void main(String[] args) {
         init(args);
-        history = new CircularBuffer<>(10);
         readCommands();
     }
 }

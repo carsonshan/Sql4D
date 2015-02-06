@@ -10,6 +10,7 @@
  */
 package com.yahoo.sql4d.query.nodes;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +24,7 @@ import org.json.JSONObject;
     { "type": "doubleSum", "name": "sample_name2", "fieldName": "sample_fieldName2" },
     {"type" : "count", "name" : "rows"},
     {"type" : "hyperUnique", "name" : "unique_users", "fieldName" : "uniques"}
+    {"type" : "cardinality", "name" : "unique_active_publishers", "fieldNames": ["active_publishers"]}
     { "type" : "min", "name" : "minValue", "fieldName" : "minV"}
     { "type" : "max", "name" : "maxValue", "fieldName" : "maxV"}
     { "type": "javascript",  "name": "sum(log(x)/y) + 10",
@@ -39,7 +41,7 @@ import org.json.JSONObject;
  * @author srikalyan
  */
 public class AggItem  {
-    public String type;
+    public String type;// longSum, doubleSum, hyperUnique(if pre computed), unique(cardinality), min, max, javascript
     public String fieldName;
     public String asName;
 
@@ -81,11 +83,23 @@ public class AggItem  {
     
     public Map<String, Object> getJsonMap() {
         Map<String, Object> map = new LinkedHashMap<>();
+        if ("unique".equals(type)) {
+            type = "cardinality";// Cardinality requires fieldNames instead of fieldName
+            if (fieldName != null) {
+                fieldNames = new ArrayList<>();
+                fieldNames.add(fieldName);
+                fieldName = null;
+            }
+        } else if ("hyperUnique".equals(type)) {
+            type = "hyperUnique";
+        }
+
         map.put("type", type);
         map.put("name", asName);
         if (fieldName != null) {
             map.put("fieldName", fieldName);
         }
+        
         if (fieldNames != null) {
             JSONArray fieldNamesArray = new JSONArray();
             for (String item:fieldNames) {

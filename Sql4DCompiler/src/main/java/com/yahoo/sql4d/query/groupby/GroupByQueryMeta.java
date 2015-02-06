@@ -57,7 +57,8 @@ import org.json.JSONObject;
  */
 public class GroupByQueryMeta  extends BaseAggQueryMeta {
     public Having having;
-
+    public LimitSpec limitSpec;
+    
     public GroupByQueryMeta() {
     }
 
@@ -73,18 +74,20 @@ public class GroupByQueryMeta  extends BaseAggQueryMeta {
     
     @Override
     public JSONObject getJson() {
-        return new JSONObject(getJsonMap());
+        return new JSONObject(getDataMap());
     }
     
     @Override
-    public Map<String, Object> getJsonMap() {
-        Map<String, Object> map = super.getJsonMap();
+    public Map<String, Object> getDataMap() {
+        Map<String, Object> map = super.getDataMap();
 
         map.put("queryType", "groupBy");
         if (having != null) {
             map.put("having", having.getJson());
         }
-        
+        if (limitSpec != null) {
+            map.put("limitSpec", limitSpec.getJson());
+        }
         return map;
     }
 
@@ -101,6 +104,8 @@ public class GroupByQueryMeta  extends BaseAggQueryMeta {
     }
 
     public static GroupByQueryMeta promote(QueryMeta qMeta) {
+        if (qMeta instanceof GroupByQueryMeta)
+            return (GroupByQueryMeta)qMeta;
         return new GroupByQueryMeta(qMeta);
     }
     

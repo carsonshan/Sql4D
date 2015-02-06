@@ -12,7 +12,7 @@ package com.yahoo.sql4d.sql4ddriver;
 
 import org.testng.annotations.AfterClass;
 import org.testng.annotations.BeforeClass;
-import scala.Either;
+import scala.util.Either;
 
 /**
  * TestBase for druid based API.
@@ -23,7 +23,7 @@ public abstract class AnalyticsDruidTestBase {
     DDataSource source = null;
 
     public void testPositive(String query) throws Exception {
-        Either<String, Either<Joiner4All, Mapper4All>> result = source.query(query);
+        Either<String, Either<Joiner4All, Mapper4All>> result = source.query(query, null);
         if (result.isLeft()) {
             throw new Exception(result.left().get());
         }

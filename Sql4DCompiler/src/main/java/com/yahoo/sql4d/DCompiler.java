@@ -12,7 +12,6 @@ package com.yahoo.sql4d;
 
 import com.yahoo.sql4d.converter.druidGLexer;
 import com.yahoo.sql4d.converter.druidGParser;
-import com.yahoo.sql4d.query.Program;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.antlr.runtime.ANTLRStringStream;
@@ -46,5 +45,11 @@ public class DCompiler {
             Logger.getLogger(DCompiler.class.getName()).log(Level.SEVERE, null, ex);
         }
         return null;
+    }
+    
+    public static void main(String[] args) {
+        //Program p = compileSql("select UNIQUE(referer) AS refe, referer FROM miab_hourly_v2 WHERE interval BETWEEN 2014-11-05T08:18:00.000Z AND 2014-11-05T08:20:00.000Z  BREAK BY 'day' GROUP BY referer;");
+        Program p = compileSql("INSERT INTO abf (timestamp , provider , title, uuid, DOUBLE_SUM(click) AS click)  VALUES ('2014-10-31 00:00:00','sri','SE','fsd-sdf-dfgdf','2') WHERE interval BETWEEN '2013-08-31' AND '2023-09-01'  BREAK BY 'day';");
+        System.out.println(p);
     }
 }

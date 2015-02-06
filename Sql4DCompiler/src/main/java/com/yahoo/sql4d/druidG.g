@@ -10,17 +10,22 @@
  */
 grammar druidG;
 
-options { k=6; }
-
+options { k=6;}
+@lexer::header  {
+	package com.yahoo.sql4d.converter;
+}
 @header {
 	package com.yahoo.sql4d.converter;
 
 	import org.antlr.runtime.*;
 	import java.util.ArrayList;
 	import java.util.Arrays;
-
 	import com.yahoo.sql4d.*;
 	import com.yahoo.sql4d.beans.*;
+	import com.yahoo.sql4d.insert.*;
+	import com.yahoo.sql4d.delete.*;
+	import com.yahoo.sql4d.drop.*;
+	import com.yahoo.sql4d.insert.nodes.*;
 	import com.yahoo.sql4d.query.*;
 	import com.yahoo.sql4d.query.nodes.*;
 	import com.yahoo.sql4d.query.groupby.*;
@@ -28,41 +33,154 @@ options { k=6; }
 	import com.yahoo.sql4d.query.select.*;
 	import com.yahoo.sql4d.query.search.*;
 	import com.yahoo.sql4d.query.topn.*;
+	import com.yahoo.sql4d.query.timeboundary.*;
+	import com.yahoo.sql4d.query.*;
+	import static com.yahoo.sql4d.utils.Utils.*;
+	import static com.yahoo.sql4d.utils.DruidUtils.*;
 }
 
 
 program	returns [Program program]
-@init { program = new Program(); }
-	: (s1=statement) { program.listOfQueries.add(s1); } 
-	  (WS j=(JOIN|LEFT_JOIN|RIGHT_JOIN) {program.joinTypes.add($j.text.toUpperCase());} WS? LPARAN WS? (s2=statement) {program.listOfQueries.add(s2);} WS? RPARAN WS? ON WS? LPARAN WS? (a=ID{ program.primaryJoinableHooks.add($a.text); }) (WS? ',' WS? a=ID{ program.primaryJoinableHooks.add($a.text); })*  WS? RPARAN WS? ) OPT_SEMI_COLON? {}
+@init { program = null; }
+	: (s1=grandQuery) { program = s1; } 
+	| (s2=grandInsert) { program = s2; } 
+	| (s3=grandDelete) { program = s3; } 
+	| (s4=grandDrop) { program = s4; } 
+	;
+
+grandDelete  returns [DeleteProgram program]
+@init { program = null; }
+	: (s1=deleteStmnt) { program = new DeleteProgram();program.addStmnt(s1); } 
+	  WS? (OPT_SEMI_COLON? | (OPT_AMPERSAND {program.waitForCompletion = false;})?) {}
 	;
 	
+grandDrop  returns [DropProgram program]
+@init { program = null; }
+	: (s1=dropStmnt) { program = new DropProgram();program.addStmnt(s1); } 
+	  WS? (OPT_SEMI_COLON? | (OPT_AMPERSAND {program.waitForCompletion = false;})?) {}
+	;
 
+grandInsert  returns [InsertProgram program]
+@init { program = null; }
+	: (s1=insertStmnt) { program = InsertProgram.getInsertInstance();program.addStmnt(s1); } 
+	| (s2=insertHStmnt) { program = InsertProgram.getInsertHadoopInstance();program.addStmnt(s2); } 
+	| (s3=insertRTStmnt) { program = InsertProgram.getInsertRTInstance();program.addStmnt(s3); } 
+	  WS? (OPT_SEMI_COLON? | (OPT_AMPERSAND {program.waitForCompletion = false;})?) {}
+	;
 
-statement returns [QueryMeta qMeta]
+deleteStmnt returns [DeleteMeta dMeta]
+@init { dMeta = new DeleteMeta();      }
+	:DELETE WS FROM WS (id=ID {dMeta.dataSource = $id.text; } WS)
+	 WHERE WS i=intervalClause	  
+	{ // We set this later after granularitySpec object is fully formed.
+	  if (i!= null && !i.isEmpty()) {
+	     dMeta.interval = i.get(0);// We already checked for list's emptiness(it is safe to access get(0).
+	  }
+	}  
+	;
+	
+dropStmnt returns [DropMeta dMeta]
+@init { dMeta = new DropMeta();      }
+	:DROP WS TABLE WS (id=ID {dMeta.dataSource = $id.text; })   
+	;
+	
+insertStmnt returns [BasicInsertMeta iMeta]
+@init { iMeta = new BasicInsertMeta();      }
+	:(INSERT WS INTO WS (id=ID {iMeta.dataSource = $id.text; }) WS? LPARAN WS? selectItems[iMeta] (WS? ',' WS? selectItems[iMeta])* WS? RPARAN WS?)
+	 (
+	   (VALUES WS? LPARAN WS? (a=anyValue {iMeta.values.add(a);} ) (WS? ',' WS? a=anyValue {iMeta.values.add(a);})* WS? RPARAN WS?)
+	     |
+	   (FROM WS (paths=SINGLE_QUOTE_STRING {iMeta.dataPath = unquote($paths.text);}) WS)
+	 )
+	 (WHERE WS i=intervalClause WS)?
+	  (BREAK WS BY WS gran=SINGLE_QUOTE_STRING { iMeta.granularitySpec = new GranularitySpec(unquote($gran.text));})? // Default granularity is all 
+	{ // We set this later after granularitySpec object is fully formed.
+	  if (i!= null && !i.isEmpty()) {
+	     iMeta.granularitySpec.interval = i.get(0);// We already checked for list's emptiness(it is safe to access get(0).
+	  }
+	}  
+	(DELIMITER WS? LPARAN WS? delim=SINGLE_QUOTE_STRING{iMeta.delimiter=unicode(unquote($delim.text));} (WS? ',' WS? listDelim=SINGLE_QUOTE_STRING {iMeta.listDelimiter=unicode(unquote($listDelim.text));})? WS? RPARAN WS?)? 
+	;
+
+insertHStmnt returns [BatchInsertMeta bMeta]
+@init { bMeta = new BatchInsertMeta();      }
+	:(INSERT_HADOOP WS INTO WS (id=ID {bMeta.dataSource = $id.text; }) WS? LPARAN WS? selectItems[bMeta] (WS? ',' WS? selectItems[bMeta])* WS? RPARAN WS?) 
+	{
+	  bMeta.rollupSpec.aggs=bMeta.aggregations;
+	  List<String> dims = getDimensions(bMeta.fetchDimensions);
+	  bMeta.dataSpec.dimensions=dims.subList(1, dims.size());
+	  bMeta.dataSpec.columns=getColumns(bMeta.fetchDimensions, bMeta.aggregations);
+	}
+	 FROM WS (paths=SINGLE_QUOTE_STRING {bMeta.pathSpec.setPath(unquote($paths.text));bMeta.dataSpec.inferFormat(unquote($paths.text));}) WS
+	 (WHERE WS i=intervalClause WS)?
+	  (BREAK WS BY WS gran=SINGLE_QUOTE_STRING { bMeta.granularitySpec = new GranularitySpec(unquote($gran.text));})? // Default granularity is all 
+	{ // We set this later after granularitySpec object is fully formed.
+	  if (i!= null && !i.isEmpty()) {
+	     bMeta.granularitySpec.interval = i.get(0);// We already checked for list's emptiness(it is safe to access get(0).
+	  }
+	}  
+	 (DELIMITER WS? LPARAN WS? delim=SINGLE_QUOTE_STRING{bMeta.dataSpec.delimiter=unicode(unquote($delim.text));} (WS? ',' WS? listDelim=SINGLE_QUOTE_STRING {bMeta.dataSpec.listDelimiter=unicode(unquote($listDelim.text));})? WS? RPARAN WS?)? 
+	 (PARTITION WS? LPARAN WS? type=SINGLE_QUOTE_STRING WS? ',' WS? size=LONG {bMeta.partitionsSpec.type=unquote($type.text);bMeta.partitionsSpec.targetPartitionSize=Long.valueOf($size.text); } WS? RPARAN WS?)?
+	 (ROLLUP WS? LPARAN WS? gran=SINGLE_QUOTE_STRING WS? ',' WS? boundary=LONG {bMeta.rollupSpec.rollupGranularity=unquote($gran.text);bMeta.rollupSpec.rowFlushBoundary=Long.valueOf($boundary.text); } WS? RPARAN WS?)?
+	;
+
+insertRTStmnt returns [RTInsertMeta iMeta]
+@init { iMeta = new RTInsertMeta();      }
+	:(INSERT_REALTIME WS INTO WS (id=ID {iMeta.dataSource = $id.text; }) WS? LPARAN WS? selectItems[iMeta] (WS? ',' WS? selectItems[iMeta])* WS? RPARAN WS?)
+	 VALUES WS? LPARAN WS? (a=anyValue {iMeta.values.add(a);} ) (WS? ',' WS? a=anyValue {iMeta.values.add(a);})* WS? RPARAN WS?
+	 (WHERE WS i=intervalClause)?
+	  (WS BREAK WS BY WS gran=SINGLE_QUOTE_STRING { iMeta.granularitySpec = new GranularitySpec(unquote($gran.text));})? // Default granularity is all 
+	{ // We set this later after granularitySpec object is fully formed.
+	  if (i!= null && !i.isEmpty()) {
+	     iMeta.granularitySpec.interval = i.get(0);// We already checked for list's emptiness(it is safe to access get(0).
+	  }
+	}  
+	;
+	
+grandQuery returns [QueryProgram program]
+@init { program = null; }
+	: (s1=queryStmnt) { program = new QueryProgram();program.addStmnt(s1); } 
+	  (WS j=(JOIN|LEFT_JOIN|RIGHT_JOIN) 
+	     {program.addJoinType($j.text.toUpperCase());}
+	   WS? LPARAN WS? (s2=queryStmnt) {program.addStmnt(s2);} WS? RPARAN WS? ON 
+	   WS? LPARAN WS? (a=ID{ program.addJoinHook($a.text); }) (WS? ',' WS? a=ID{ program.addJoinHook($a.text); })*  WS? RPARAN 
+          )?
+	  WS? OPT_SEMI_COLON? {}
+	;
+
+queryStmnt returns [QueryMeta qMeta]
 @init { qMeta = GroupByQueryMeta.promote(new QueryMeta());
 	((BaseAggQueryMeta)qMeta).aggregations = new ArrayList<>();
 	qMeta.intervals = new ArrayList<>();
       }
-	: SELECT WS
+	: SELECT 
 	     (
 	      (// For GroupBy , Timeseries, TopN, Select.
-	       selectItems[qMeta] (WS? ',' WS? selectItems[qMeta])*
+	       WS selectItems[qMeta] (WS? ',' WS? selectItems[qMeta])*
 	      )
 	      |
-	      ('*')
-	     )    
-	  WS FROM WS id=ID  { 
-	  	qMeta.dataSource = $id.text; 
-  	  	if (((BaseAggQueryMeta)qMeta).aggregations.isEmpty()) {
-	  		qMeta = SelectQueryMeta.promote(qMeta);
-	  	}
-	    } 
-	  
-	  
-	  WS WHERE WS whereClause[qMeta]
+	      (WS '*')
+	     )?
+	  WS FROM 
+	  (// Can either select from a table
+  	         (WS id=ID  { qMeta.dataSource = $id.text; })
+   	             | // Or select from another query.
+	         (WS LPARAN (fromQuery=queryStmnt) RPARAN {qMeta.queryDataSource = fromQuery;}) 
+	  ) {
+             if (((BaseAggQueryMeta)qMeta).aggregations.isEmpty()) {
+	  		     qMeta = SelectQueryMeta.promote(qMeta);
+	  	     }
+	     }
+	(
+	  WS WHERE WS whereClause[qMeta] 
 	  (		  
-		  (WS BREAK WS BY WS granularityClause[qMeta])? // Default granularity is all
+		  (WS BREAK WS BY WS gran=granularityClause {
+		      qMeta.granularity = gran.a;
+		      if (gran.b != null) {
+		        qMeta.microIntervals.addAll(gran.b);
+		      }
+		    }
+		  )? // Default granularity is all
 		  (WS GROUP WS BY WS 
 		      {
 		       qMeta = GroupByQueryMeta.promote(qMeta);
@@ -89,20 +207,51 @@ statement returns [QueryMeta qMeta]
 		       )?
 		   )? {qMeta = QueryUtils.checkAndPromoteToTimeSeries(qMeta);}
 		  (WS ORDER WS BY WS (id=ID) 
-		      {	qMeta = TopNQueryMeta.promote(qMeta);
-		      	((TopNQueryMeta)qMeta).metric = $id.text;
-		      } 
-		  )?
-		  (WS LIMIT WS (l=LONG)
 		      {	
-		      	if (qMeta instanceof TopNQueryMeta) {
-		      		((TopNQueryMeta)qMeta).threshold = Integer.valueOf($l.text);
-		      	} else if (qMeta instanceof SelectQueryMeta) {
-				((SelectQueryMeta)qMeta).pagingSpec.threshold = Integer.valueOf($l.text);	      	
+		  	if (((PlainDimQueryMeta)qMeta).fetchDimensions.size() != 1) {
+			   ((GroupByQueryMeta)qMeta).limitSpec = new LimitSpec();
+			   
+		  	} else {// If fetchDimensions = 1 then TopN is more optimal.
+		           qMeta = TopNQueryMeta.promote(qMeta);
+	        	   ((TopNQueryMeta)qMeta).metric = $id.text;
 		      	}
-		      } 
+		      }
+		       
+		      (WS dir=(ASC|DESC) 
+		      { 
+		        if (qMeta instanceof GroupByQueryMeta && ((GroupByQueryMeta)qMeta).limitSpec != null) {
+			    if ($dir != null && $dir.text != null) {
+			        ((GroupByQueryMeta)qMeta).limitSpec.addColumn($id.text, $dir.text);
+			    } else {
+			    	((GroupByQueryMeta)qMeta).limitSpec.addColumn($id.text, "ASC");
+			    }
+		      	}
+		      })?
+			{
+			    // At this point if the qMeta is not TopN and is still GroupBy then do the following(default is ascending sort).
+			    if (qMeta instanceof GroupByQueryMeta && ((GroupByQueryMeta)qMeta).limitSpec != null) {
+			       if (!((GroupByQueryMeta)qMeta).limitSpec.columns.containsKey($id.text)) {
+			       	   ((GroupByQueryMeta)qMeta).limitSpec.addColumn($id.text, "ASC");
+			       }
+			       
+			    }
+
+			}		      
 		  )?
-		  
+		  (
+		   WS LIMIT WS (l=LONG)
+		      {	
+		  	if (qMeta instanceof SelectQueryMeta) {
+			    ((SelectQueryMeta)qMeta).pagingSpec.threshold = Integer.valueOf($l.text);	      	
+		      	} else if (qMeta instanceof TopNQueryMeta) {
+		      	    ((TopNQueryMeta)qMeta).threshold = Integer.valueOf($l.text);
+		      	} else if (((PlainDimQueryMeta)qMeta).fetchDimensions.size() != 1) {
+		      	    if (((GroupByQueryMeta)qMeta).limitSpec != null) {
+		      	        ((GroupByQueryMeta)qMeta).limitSpec.limit = Long.valueOf($l.text);
+		      	    }
+		      	}
+		      }    
+		  )?
 		    
 	  	  (WS THEN WS p=postAggItem {QueryUtils.setPostAggregation(qMeta, p);})?
 	  )
@@ -110,53 +259,73 @@ statement returns [QueryMeta qMeta]
 	   WS SORT WS? LPARAN WS? (s=SINGLE_QUOTE_STRING) {((SearchQueryMeta)qMeta).setSort($s.text);} WS? RPARAN
 	  )?
 	  (WS HINT WS? LPARAN WS? s=SINGLE_QUOTE_STRING {qMeta = HintProcessor.process(qMeta, $s.text);} WS? RPARAN)?
+	  )? 
+	  {
+	  	if (qMeta.intervals == null || qMeta.intervals.isEmpty()) {
+	  		qMeta = TimeBoundaryQueryMeta.promote(qMeta);
+	  	}
+	  }
 	  ;
 
-selectItems[QueryMeta qMeta]
-	:  sI1=aggItemInSelect { ((BaseAggQueryMeta)qMeta).aggregations.add(sI1); }
-	|  simpleDim[qMeta]
-	;
 
-simpleDim[QueryMeta qMeta]
+anyValue returns [Object obj] 
+	:a=SINGLE_QUOTE_STRING {obj = unquote($a.text);} | b=(LONG | FLOAT){obj = $b.text;}
+	;
+	
+selectItems[BaseStatementMeta meta]
+	:  ai=aggItem { 
+	      if (meta instanceof QueryMeta) {
+	        ((BaseAggQueryMeta)meta).aggregations.add(ai);
+	      } else if (meta instanceof InsertMeta) {
+ 	        ((InsertMeta)meta).aggregations.add(ai);
+	      }
+	   }
+	|  sd=simpleDim { 
+	      if (meta instanceof QueryMeta) {
+	         ((PlainDimQueryMeta)meta).fetchDimensions.put(sd.a, sd.b);
+	      } else if (meta instanceof InsertMeta) {
+ 	         ((InsertMeta)meta).fetchDimensions.put(sd.a, sd.b);
+	      }
+	   }
+	;
+	
+simpleDim returns [Pair<String, String> dims]
 	: (a=ID (WS AS WS b=ID)? {
-	    if (b != null) {
-   	      ((PlainDimQueryMeta)qMeta).fetchDimensions.put($a.text, $b.text);
-   	    } else {
-   	      ((PlainDimQueryMeta)qMeta).fetchDimensions.put($a.text, null);
-   	    }
+	     dims = (b != null)? new Pair<String, String>($a.text, $b.text): new Pair<String, String>($a.text, null);
 	   }
 	  )
 	;
 
 // After interval any filter followed must be associated through AND.
 whereClause[QueryMeta qMeta]
-	:intervalClause[qMeta] (WS AND WS f=grandFilter {qMeta.filter = f;} )?
+	:intls=intervalClause {qMeta.intervals.addAll(intls);} (WS AND WS f=grandFilter {qMeta.filter = f;} )?
 	;
 	
 // interval defined in the WHERE clause is not part of the filter(thats how druid is)
-intervalClause[QueryMeta qMeta]
+intervalClause returns [List<Interval> intervals]
+@init{ intervals = new ArrayList<>();}
 	: 'interval' WS BETWEEN WS 
 	(
 	  (
 	    ((st=isoTime |  st2=SINGLE_QUOTE_STRING ) WS AND WS (et=isoTime |  et2=SINGLE_QUOTE_STRING ) ) 
 		{  if (st2 != null) {
 			if (et2 != null) {
-				qMeta.intervals.add(new Interval($st2.text, $et2.text));
+				intervals.add(new Interval($st2.text, $et2.text));
 			} else {
-				qMeta.intervals.add(new Interval($st2.text, $et.text));
+				intervals.add(new Interval($st2.text, $et.text));
 			}
 		   } else {
 			if (et2 != null) {
-				qMeta.intervals.add(new Interval($st.text, $et2.text));
+				intervals.add(new Interval($st.text, $et2.text));
 			} else {
-				qMeta.intervals.add(new Interval($st.text, $et.text));
+				intervals.add(new Interval($st.text, $et.text));
 			}
 		   }
 		}
-	  )
+	  ) 
 	  |
-	  (LPARAN WS? p1=pairString {qMeta.intervals.add(new Interval(p1.a, p1.b));} 
-	     (WS? ',' WS? p2=pairString {qMeta.intervals.add(new Interval(p2.a, p2.b));})* WS? RPARAN)
+	  (LPARAN WS? p1=pairString {intervals.add(new Interval(p1.a, p1.b));} 
+	     (WS? ',' WS? p2=pairString {intervals.add(new Interval(p2.a, p2.b));})* WS? RPARAN)
 	)
 	;
 
@@ -166,28 +335,29 @@ getEquals returns [EqualsToHolder holder]
 	;
 	
 ///////////////// granularity //////////////
-
-granularityClause [QueryMeta qMeta]
-@init {qMeta.granularity = new Granularity();}
-	:((s=SINGLE_QUOTE_STRING){qMeta.granularity = new Granularity($s.text);})
+// TODO: Cleanup the following rule.
+granularityClause returns [Pair<Granularity, List<Pair<Integer, Integer>>> clause]
+@init{Granularity granularity = new Granularity("all");clause = new Pair<>(granularity, null);}
+	:((s=SINGLE_QUOTE_STRING){granularity = new Granularity($s.text);clause = new Pair<>(granularity, null);})
 	      |
 	 (
-	   ( DURATION {qMeta.granularity.type = "duration";} WS? LPARAN WS? dur=SINGLE_QUOTE_STRING {qMeta.granularity.setDuration($dur.text);} WS? (',' WS? orig=SINGLE_QUOTE_STRING {qMeta.granularity.setOrigin($orig.text);})? (WS? ',' WS? granularityInclude[qMeta] WS?)? RPARAN) 
+	   ( DURATION WS? LPARAN WS? dur=SINGLE_QUOTE_STRING {granularity.setDuration($dur.text);} WS? (',' WS? orig=SINGLE_QUOTE_STRING {granularity.setOrigin($orig.text);})? {clause = new Pair<>(granularity, null);}(WS? ',' WS? inc=granularityInclude {clause = new Pair<>(granularity, inc);} WS?)? RPARAN) 
 	      |
-	   ( PERIOD {qMeta.granularity.type = "period";} WS? LPARAN WS? per=SINGLE_QUOTE_STRING {qMeta.granularity.setPeriod($per.text);} WS? (',' WS? tz=SINGLE_QUOTE_STRING {qMeta.granularity.setTimeZone($tz.text);})? WS? (',' WS? orig=SINGLE_QUOTE_STRING {qMeta.granularity.setOrigin($orig.text);})? (WS? ',' WS? granularityInclude[qMeta] WS?)? RPARAN) 
+	   ( PERIOD WS? LPARAN WS? per=SINGLE_QUOTE_STRING {granularity.setPeriod($per.text);} WS? (',' WS? tz=SINGLE_QUOTE_STRING {granularity.setTimeZone($tz.text);})? WS? (',' WS? orig=SINGLE_QUOTE_STRING {granularity.setOrigin($orig.text);})? {clause = new Pair<>(granularity, null);} (WS? ',' WS? inc=granularityInclude {clause = new Pair<>(granularity, inc);} WS?)? RPARAN) 
 	 )
 	;
 
-granularityInclude [QueryMeta qMeta]
+granularityInclude returns [List<Pair<Integer, Integer>> microIntervals]
+@init{microIntervals = new ArrayList<>();}
 	:
-	( WS INCLUDE WS? LPARAN WS? (p1=pairNums {qMeta.microIntervals.add(p1);} (',' p2=pairNums{qMeta.microIntervals.add(p2);})*)  WS? RPARAN )
+	( WS INCLUDE WS? LPARAN WS? (p1=pairNums {microIntervals.add(p1);} (',' p2=pairNums{microIntervals.add(p2);})*)  WS? RPARAN )
 	;
 	
-pairNums returns [Pair<Integer> pair]
+pairNums returns [Pair<Integer, Integer> pair]
 	: (LSQUARE WS? i=LONG  WS? ',' WS? j=LONG WS? RSQUARE) { pair = new Pair<>(Integer.parseInt($i.text), Integer.parseInt($j.text));}
 	;
 	
-pairString returns [Pair<String> pair]
+pairString returns [Pair<String, String> pair]
 	: (LSQUARE WS? i=SINGLE_QUOTE_STRING  WS? ',' WS? j=SINGLE_QUOTE_STRING WS? RSQUARE) { pair = new Pair<>(($i.text).replaceAll("'", ""), ($j.text).replaceAll("'", ""));}
 	;
 	
@@ -219,10 +389,7 @@ selectorFilter returns [Filter filter]
 @init {filter = new Filter("selector");}
 	:	e=getEquals  
 		{filter.dimension = e.name;
-		 filter.value = e.value;
-		 if (filter.value.startsWith("'") && filter.value.endsWith("'")) {
-		 	filter.value = filter.value.substring(1, filter.value.length() - 1);
-		 }
+		 filter.value = unquote(e.value);
 		}
 	;
 
@@ -230,10 +397,7 @@ regexFilter returns [Filter filter]
 @init {filter = new Filter("regex");}
 	:	(a=ID WS LIKE WS  b=(SINGLE_QUOTE_STRING)) 
 		{filter.dimension = $a.text;
-		 filter.pattern = $b.text;
-		 if (filter.pattern.startsWith("'") && filter.pattern.endsWith("'")) {
-		 	filter.pattern = filter.pattern.substring(1, filter.pattern.length() - 1);
-		 }
+		 filter.pattern = unquote($b.text);
 		}
 	;
 
@@ -268,19 +432,27 @@ grandFilter returns [Filter filter]
 /////////////////////////////////////////////////////////	  
 ///////////////////  Aggregation rules  //////////////////	
 /////////////////////////////////////////////////////////
-aggItemInSelect returns [AggItem aggItem]
+aggItem returns [AggItem aggItem]
 @init {  aggItem = new AggItem(); }
 	: aggCallSite[aggItem] (WS AS WS x=ID {aggItem.setAsName($x.text);})? ; 
 
 aggCallSite [AggItem aggItem]
-	: p=aggFunc {aggItem.setAggType(p);} (WS? LPARAN WS? ( x=ID {aggItem.setFieldName($x.text);}) WS? RPARAN) 
+	: p=aggFunc {aggItem.setAggType(p);} (WS? LPARAN WS? ( x=ID {aggItem.setFieldName($x.text);}) (WS? ',' WS? y=ID {
+	    if (aggItem.fieldNames == null || aggItem.fieldNames.isEmpty()) {
+	       aggItem.fieldNames = new ArrayList<>();
+	       aggItem.fieldNames.add(aggItem.fieldName);
+	       aggItem.fieldName = null;
+	    }
+	    aggItem.fieldNames.add($y.text);
+	})* WS? RPARAN) 
 	| COUNT {aggItem.setAggType("count");} ('(*)') // TODO: Remove hardcode (*) (make to match multiple White spaces)
 	;
 	
 aggFunc returns [String name]
 	: LONG_SUM {$name = "longSum";}
 	| DOUBLE_SUM {$name = "doubleSum";}
-	| UNIQUE {$name = "hyperUnique";}
+	| UNIQUE {$name = "unique";}
+	| HYPER_UNIQUE {$name = "hyperUnique";}
 	| MIN {$name = "min";}
 	| MAX {$name = "max";}
 	| JAVASCRIPT {$name = "javascript";}
@@ -367,7 +539,10 @@ postAggArithOper[PostAggItem postAggItem]
 ////////////// Miscellaneous rules ////////////////
 ////////////////////////////////////////////////////////
 isoTime returns [String date]
-	:d=DATE_HOUR {$date = $d.text;}
+	:d=DATE_YEAR_ONLY {$date = $d.text;}
+	|d=DATE_YEAR_MONTH_ONLY {$date = $d.text;}
+	|d=DATE {$date = $d.text;}
+	|d=DATE_HOUR {$date = $d.text;}
 	|d=DATE_HOUR_MIN {$date = $d.text;}
 	|d=DATE_HOUR_MIN_SEC {$date = $d.text;}
 	|d=DATE_HOUR_MIN_SEC_SUB {$date = $d.text;}
@@ -384,13 +559,39 @@ RCURLY	:	 '}';
 LSQUARE	:	 '[';
 RSQUARE	:	 ']';
 
+///////////// CRUD tokens
+INSERT   	:('INSERT'|'insert');
+INSERT_HADOOP	:('INSERT_HADOOP'|'insert_hadoop');
+INSERT_REALTIME :('INSERT_REALTIME'|'insert_realtime');
+INTO 	        :('INTO'|'into');
+VALUES          :('VALUES'|'values');
 
+
+MAX_WINDOW      :('MAX_WINDOW'|'max_window');
+
+DELIMITER       :('DELIMITER'|'delimiter');
+PARTITION       :('PARTITION'|'partition');
+ROLLUP          :('ROLLUP'   |'rollup');
+
+DROP            :('DROP'|'drop');
+TABLE           :('TABLE'|'table');
+DELETE          :('DELETE'|'delete');
+KAFKA           :('KAFKA'|'kafka');
+
+
+///////////// CRUD Data types
+STRING		:('STRING');
+ISO		:('ISO');
+AUTO_ISO	:('AUTO_ISO');
+
+///////////// Query tokens
 SELECT 	:	('SELECT'|'select');
 
 COUNT 	:	('COUNT');
 LONG_SUM :	('LONG_SUM');
 DOUBLE_SUM :	('DOUBLE_SUM');
 UNIQUE  :	('UNIQUE');
+HYPER_UNIQUE  :	('HYPER_UNIQUE');
 MIN 	:	('MIN');
 MAX	:	('MAX');
 
@@ -413,6 +614,8 @@ AND 	:	('AND'|'and');
 OR 	:	('OR'|'or');
 NOT 	:	('NOT'|'not');
 GROUP	:	('GROUP' | 'group');
+ASC	:	('ASC' | 'asc');
+DESC	:	('DESC' | 'desc');
 ORDER	:	('ORDER' | 'order');// Metric for TopN
 HAVING	:	('HAVING' | 'having');// Metric for groupBy
 BREAK	:	('BREAK' | 'break');// Granularity
@@ -441,13 +644,22 @@ ON 	:	('ON')
 OPT_SEMI_COLON
 	: ';';
 
+OPT_AMPERSAND
+	: '&';
+
 WS 
-	: (' ' | '\t')+
+	: (' ' | '\t' | NEWLINE)+
 	;
 
+// IF the following is not made a fragment then, any 4 digit number would become a DATE_YEAR_ONLY token(even when you want to consider as token LONG)
+fragment DATE_YEAR_ONLY	
+	: NUM NUM NUM NUM; 	
 	
-fragment DATE 	
-	: NUM NUM NUM NUM '-' NUM NUM '-' NUM NUM; 	
+DATE_YEAR_MONTH_ONLY	
+	: DATE_YEAR_ONLY '-' NUM NUM; 	
+
+DATE 	
+	: DATE_YEAR_MONTH_ONLY '-' NUM NUM; 	
 	
 DATE_HOUR
 	: DATE 'T' NUM NUM; 	
@@ -483,17 +695,11 @@ ID  :	('a'..'z'|'A'..'Z'|'_') ('a'..'z'|'A'..'Z'|'0'..'9'|'_')*
     ;
 
 
-NEWLINE   :  ( '\r\n' // DOS
+fragment NEWLINE   :  ( '\r\n' // DOS
                | '\r'   // MAC
                | '\n'   // Unix
              )
-             { 
-                $channel = HIDDEN;
-             }
           ;
-STRING
-    :  '"' ( ESC_SEQ | ~('\\'|'"') )* '"'
-    ;
     
 
 SINGLE_QUOTE_STRING
@@ -501,7 +707,7 @@ SINGLE_QUOTE_STRING
     ;
 
 LONG : NUM+;
-FLOAT    :    LONG ('.' LONG)?;
+FLOAT    :    NUM* '.' NUM+;
 
 fragment NUM : ('0'..'9') ;
 
